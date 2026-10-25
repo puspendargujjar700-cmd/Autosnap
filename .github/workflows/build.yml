@@ -19,9 +19,12 @@ jobs:
         run: yes | sdkmanager --licenses || true
       - name: Make icon from picture
         run: |
-          ICON=$(ls *.jpg *.jpeg *.png 2>/dev/null | head -1)
+          ICON=$(find . -maxdepth 1 -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' \) | head -1)
           echo "Icon file: $ICON"
           if [ -n "$ICON" ]; then
+            if ! command -v convert >/dev/null 2>&1; then
+              sudo apt-get update -y && sudo apt-get install -y imagemagick
+            fi
             rm -f app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml
             for s in "mdpi 48" "hdpi 72" "xhdpi 96" "xxhdpi 144" "xxxhdpi 192"; do
               set -- $s
