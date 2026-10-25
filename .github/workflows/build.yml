@@ -17,6 +17,18 @@ jobs:
           gradle-version: 8.7
       - name: Accept licenses
         run: yes | sdkmanager --licenses || true
+      - name: Make icon from picture
+        run: |
+          ICON=$(ls *.jpg *.jpeg *.png 2>/dev/null | head -1)
+          echo "Icon file: $ICON"
+          if [ -n "$ICON" ]; then
+            rm -f app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml
+            for s in "mdpi 48" "hdpi 72" "xhdpi 96" "xxhdpi 144" "xxxhdpi 192"; do
+              set -- $s
+              mkdir -p app/src/main/res/mipmap-$1
+              convert "$ICON" -resize $2x$2 -background white -gravity center -extent $2x$2 app/src/main/res/mipmap-$1/ic_launcher.png
+            done
+          fi
       - name: Build debug APK
         run: gradle assembleDebug --no-daemon
       - uses: actions/upload-artifact@v4
