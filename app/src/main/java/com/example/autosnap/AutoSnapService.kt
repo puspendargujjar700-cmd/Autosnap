@@ -2,12 +2,18 @@ package com.example.autosnap
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
+import android.content.ContentValues
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.Color
 import android.graphics.Path
 import android.graphics.Rect
+import android.net.Uri
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
+import android.provider.MediaStore
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
@@ -17,11 +23,23 @@ class AutoSnapService : AccessibilityService() {
     companion object {
         const val TAG = "AutoSnap"
         @Volatile var instance: AutoSnapService? = null
+
+        const val LENS_URL =
+            "https://snapchat.com/unlock/?type=SNAPCODE&uuid=d5d091996f1c40faae640f37e39377a3&metadata=01"
+
+        // Lens ke andar gallery kholne ka tap (screen ka hissa 0..1)
+        const val LENS_TAP_X = 0.5f
+        const val LENS_TAP_Y = 0.5f
+        // Gallery me sabse upar wali photo (pehla thumbnail)
+        const val THUMB_X = 0.17f
+        const val THUMB_Y = 0.30f
     }
 
     private val h = Handler(Looper.getMainLooper())
     private var wl: PowerManager.WakeLock? = null
     private var scrollTries = 0
+    private var names: List<String> = emptyList()
+    private var nameIdx = 0
 
     override fun onServiceConnected() { instance = this }
     override fun onUnbind(intent: Intent?): Boolean { instance = null; return super.onUnbind(intent) }
@@ -37,13 +55,39 @@ class AutoSnapService : AccessibilityService() {
         wl = pm.newWakeLock(
             PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP,
             "autosnap:wl"
-        ).also { it.acquire(120_000) }
+        ).also { it.acquire(180_000) }
 
-        val launch = packageManager.getLaunchIntentForPackage(Config.SNAP_PKG)
-        if (launch == null) { Log.e(TAG, "Snapchat installed nahi"); finish(); return }
-        launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-        startActivity(launch)
-        h.postDelayed({ capture() }, 6000)
+        if (prepareBlackImage() == null) { Log.e(TAG, "black image nahi bani"); finish(); return }
+
+        try {
+            val i = Intent(Intent.ACTION_VIEW, Uri.parse(LENS_URL)).apply {
+                setPackage(Config.SNAP_PKG)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            }
+            startActivity(i)
+        } catch (e: Exception) {
+            Log.e(TAG, "lens open fail", e)
+            finish()
+            return
+        }
+        h.postDelayed({ openGallery() }, 9000)
+    }
+
+    private fun openGallery() {
+        val n = find("Gallery", false) ?: find("Choose", false) ?: find("Select", false)
+        if (n != null) click(n) else tapFrac(LENS_TAP_X, LENS_TAP_Y)
+        h.postDelayed({ pickPhoto() }, 3500)
+    }
+
+    private fun pickPhoto() {
+        tapFrac(THUMB_X, THUMB_Y)
+        h.postDelayed({ confirmPhoto() }, 2000)
+    }
+
+    private fun confirmPhoto() {
+        val n = find("Done", true) ?: find("Add", true) ?: find("Select", true) ?: find("OK", true)
+        if (n != null) click(n)
+        h.postDelayed({ capture() }, 3500)
     }
 
     private fun capture() {
@@ -54,23 +98,32 @@ class AutoSnapService : AccessibilityService() {
     private fun sendTo() {
         val n = find("Send To", false)
         if (n != null) click(n) else tapFrac(Config.SEND_TO_X, Config.SEND_TO_Y)
+        names = Config.friend(this).split(",").map { it.trim() }.filter { it.isNotEmpty() }
+        nameIdx = 0
         scrollTries = 0
         h.postDelayed({ pickFriend() }, 2500)
     }
 
     private fun pickFriend() {
-        val name = Config.friend(this)
-        val n = if (name.isNotEmpty()) find(name, false) else null
+        if (nameIdx >= names.size) {
+            h.postDelayed({ send() }, 800)
+            return
+        }
+        val n = find(names[nameIdx], false)
         if (n != null) {
             click(n)
-            h.postDelayed({ send() }, 1200)
-        } else if (scrollTries < 4) {
+            nameIdx++
+            scrollTries = 0
+            h.postDelayed({ pickFriend() }, 900)
+        } else if (scrollTries < 6) {
             scrollTries++
             rootInActiveWindow?.let { scrollDown(it) }
             h.postDelayed({ pickFriend() }, 1200)
         } else {
-            Log.e(TAG, "Friend '$name' nahi mila")
-            finish()
+            Log.e(TAG, "Friend '${names[nameIdx]}' nahi mila, skip")
+            nameIdx++
+            scrollTries = 0
+            h.postDelayed({ pickFriend() }, 300)
         }
     }
 
@@ -83,6 +136,33 @@ class AutoSnapService : AccessibilityService() {
     private fun finish() {
         performGlobalAction(GLOBAL_ACTION_HOME)
         if (wl?.isHeld == true) wl?.release()
+    }
+
+    // ---------- Black image ----------
+
+    private fun prepareBlackImage(): Uri? {
+        val sp = getSharedPreferences("cfg", MODE_PRIVATE)
+        try {
+            sp.getString("black_uri", null)?.let {
+                try { contentResolver.delete(Uri.parse(it), null, null) } catch (_: Exception) {}
+            }
+            val bmp = Bitmap.createBitmap(1080, 1920, Bitmap.Config.ARGB_8888)
+            bmp.eraseColor(Color.BLACK)
+            val v = ContentValues().apply {
+                put(MediaStore.Images.Media.DISPLAY_NAME, "autosnap_black_${System.currentTimeMillis()}.png")
+                put(MediaStore.Images.Media.MIME_TYPE, "image/png")
+                if (Build.VERSION.SDK_INT >= 29) {
+                    put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/AutoSnap")
+                }
+            }
+            val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, v) ?: return null
+            contentResolver.openOutputStream(uri)?.use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+            sp.edit().putString("black_uri", uri.toString()).apply()
+            return uri
+        } catch (e: Exception) {
+            Log.e(TAG, "black image fail", e)
+            return null
+        }
     }
 
     // ---------- Helpers ----------
