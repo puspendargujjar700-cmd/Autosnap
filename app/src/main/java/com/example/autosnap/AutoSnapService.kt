@@ -30,7 +30,7 @@ class AutoSnapService : AccessibilityService() {
         // Lens ke andar gallery kholne ka tap (screen ka hissa 0..1)
         const val LENS_TAP_X = 0.5f
         const val LENS_TAP_Y = 0.5f
-        // Gallery me sabse upar wali photo (pehla thumbnail)
+        // Fallback: gallery me pehla thumbnail
         const val THUMB_X = 0.17f
         const val THUMB_Y = 0.30f
     }
@@ -80,8 +80,67 @@ class AutoSnapService : AccessibilityService() {
     }
 
     private fun pickPhoto() {
-        tapFrac(THUMB_X, THUMB_Y)
+        // 1) AutoSnap album/folder dikhe to wahi kholo
+        val album = find("AutoSnap", false)
+        if (album != null) {
+            click(album)
+            h.postDelayed({ tapFirstImage() }, 2500)
+            return
+        }
+        // 2) Albums tab ho to kholo, phir AutoSnap dhoondo
+        val albums = find("Albums", false)
+        if (albums != null) {
+            click(albums)
+            h.postDelayed({
+                val a = find("AutoSnap", false)
+                if (a != null) {
+                    click(a)
+                    h.postDelayed({ tapFirstImage() }, 2500)
+                } else {
+                    tapFirstImage()
+                }
+            }, 2500)
+            return
+        }
+        // 3) Seedha pehli photo
+        tapFirstImage()
+    }
+
+    private fun tapFirstImage() {
+        val root = rootInActiveWindow
+        val list = ArrayList<AccessibilityNodeInfo>()
+        if (root != null) collectImages(root, list)
+        val minTop = (resources.displayMetrics.heightPixels * 0.12f).toInt()
+        var best: AccessibilityNodeInfo? = null
+        var bt = Int.MAX_VALUE
+        var bl = Int.MAX_VALUE
+        for (n in list) {
+            val r = Rect()
+            n.getBoundsInScreen(r)
+            if (r.top < minTop) continue
+            if (r.top < bt || (r.top == bt && r.left < bl)) {
+                best = n
+                bt = r.top
+                bl = r.left
+            }
+        }
+        if (best != null) click(best) else tapFrac(THUMB_X, THUMB_Y)
         h.postDelayed({ confirmPhoto() }, 2000)
+    }
+
+    private fun collectImages(n: AccessibilityNodeInfo, out: MutableList<AccessibilityNodeInfo>) {
+        val d = n.contentDescription?.toString() ?: ""
+        val cls = n.className?.toString() ?: ""
+        val r = Rect()
+        n.getBoundsInScreen(r)
+        val big = r.width() > 120 && r.height() > 120
+        if (big && (d.contains("photo", true) || d.contains("image", true) || cls.contains("ImageView"))) {
+            out.add(n)
+        }
+        for (i in 0 until n.childCount) {
+            val c = n.getChild(i) ?: continue
+            collectImages(c, out)
+        }
     }
 
     private fun confirmPhoto() {
@@ -138,19 +197,40 @@ class AutoSnapService : AccessibilityService() {
         if (wl?.isHeld == true) wl?.release()
     }
 
-    // ---------- Black image ----------
+    // ---------- Black image (wahi ek image, har baar) ----------
 
     private fun prepareBlackImage(): Uri? {
         val sp = getSharedPreferences("cfg", MODE_PRIVATE)
+        val now = System.currentTimeMillis()
+        val future = now + 86_400_000L // kal ki date, taaki hamesha sabse upar rahe
         try {
-            sp.getString("black_uri", null)?.let {
-                try { contentResolver.delete(Uri.parse(it), null, null) } catch (_: Exception) {}
+            val old = sp.getString("black_uri", null)
+            if (old != null) {
+                val u = Uri.parse(old)
+                val exists = try {
+                    contentResolver.query(u, arrayOf(MediaStore.Images.Media._ID), null, null, null)
+                        ?.use { it.moveToFirst() } ?: false
+                } catch (_: Exception) { false }
+                if (exists) {
+                    val upd = ContentValues().apply {
+                        put(MediaStore.Images.Media.DATE_TAKEN, future)
+                        put(MediaStore.Images.Media.DATE_MODIFIED, future / 1000)
+                    }
+                    try {
+                        contentResolver.update(u, upd, null, null)
+                        return u
+                    } catch (_: Exception) { }
+                }
             }
+
             val bmp = Bitmap.createBitmap(1080, 1920, Bitmap.Config.ARGB_8888)
             bmp.eraseColor(Color.BLACK)
             val v = ContentValues().apply {
-                put(MediaStore.Images.Media.DISPLAY_NAME, "autosnap_black_${System.currentTimeMillis()}.png")
+                put(MediaStore.Images.Media.DISPLAY_NAME, "autosnap_black.png")
                 put(MediaStore.Images.Media.MIME_TYPE, "image/png")
+                put(MediaStore.Images.Media.DATE_TAKEN, future)
+                put(MediaStore.Images.Media.DATE_ADDED, future / 1000)
+                put(MediaStore.Images.Media.DATE_MODIFIED, future / 1000)
                 if (Build.VERSION.SDK_INT >= 29) {
                     put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/AutoSnap")
                 }
