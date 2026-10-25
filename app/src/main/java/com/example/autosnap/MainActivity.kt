@@ -21,7 +21,7 @@ class MainActivity : Activity() {
             setPadding(pad, pad, pad, pad)
         }
 
-        col.addView(TextView(this).apply { text = "AutoSnap"; textSize = 24f })
+        col.addView(TextView(this).apply { text = "AutoSnap v2"; textSize = 24f })
 
         val tp = TimePicker(this).apply {
             setIs24HourView(true)
@@ -31,7 +31,7 @@ class MainActivity : Activity() {
         col.addView(tp)
 
         val friend = EditText(this).apply {
-            hint = "Friend ka naam (Snapchat me jaisa dikhta hai)"
+            hint = "Friends ke naam, comma se alag (karan, rahul)"
             setText(Config.friend(this@MainActivity))
         }
         col.addView(friend)
