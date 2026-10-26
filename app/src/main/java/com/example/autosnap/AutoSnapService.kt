@@ -21,20 +21,28 @@ class AutoSnapService : AccessibilityService() {
         const val TAG = "AutoSnap"
         @Volatile var instance: AutoSnapService? = null
 
-        // ---- Tune karne wale numbers (screen ka hissa 0..1) ----
-        // Pen (draw) icon ki jagah, agar naam se na mile
-        const val PEN_X = 0.93f
-        const val PEN_Y = 0.20f
-        // Rang wali patti (slider) ki x jagah
-        const val COLOR_X = 0.93f
-        // Zigzag lines ke beech ka gap (dp me). Chhota = zyada pakka fill, par der lagti hai
-        const val FILL_GAP_DP = 10f
-        // Caption kholne ke liye snap par tap
-        const val CAPTION_TAP_X = 0.5f
-        const val CAPTION_TAP_Y = 0.45f
+        // ---- Tumhare screenshot se nikale hue numbers (screen ka hissa 0..1) ----
+        const val PEN_X = 0.917f
+        const val PEN_Y = 0.136f
+        const val TEXT_X = 0.917f
+        const val TEXT_Y = 0.072f
+        const val BACK_X = 0.07f
+        const val BACK_Y = 0.076f
+        const val SLIDER_X = 0.914f
+        const val SLIDER_TOP_Y = 0.081f
+        const val SLIDER_BOTTOM_Y = 0.248f   // yahan black hai
+        const val SNAP_TOP = 0.045f
+        const val SNAP_BOTTOM = 0.83f
+        const val SENDTO_X = 0.81f
+        const val SENDTO_Y = 0.878f
 
-        // Roj alag rang: slider ki y jagah
-        private val COLOR_Y = listOf(0.30f, 0.38f, 0.46f, 0.54f, 0.62f, 0.70f, 0.78f)
+        // Zigzag lines ka gap (pixel me). Khali jagah bache to 9f kar do
+        const val FILL_GAP_PX = 12f
+
+        // Emoji bada karne ke liye pinch ka center aur failav
+        const val EMOJI_CX = 0.5f
+        const val EMOJI_CY = 0.43f
+        const val PINCH_END_FRAC = 0.40f
 
         private val EMOJIS = listOf(
             "😀", "😂", "🥰", "😎", "🤩", "😴", "🤔", "🥳", "😇", "🤗",
@@ -58,8 +66,10 @@ class AutoSnapService : AccessibilityService() {
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
     override fun onInterrupt() {}
 
-    private fun dayIndex(): Int = (System.currentTimeMillis() / 86_400_000L).toInt()
-    private fun todayEmoji(): String = EMOJIS[dayIndex() % EMOJIS.size]
+    private fun todayEmoji(): String {
+        val day = (System.currentTimeMillis() / 86_400_000L).toInt()
+        return EMOJIS[day % EMOJIS.size]
+    }
 
     // ---------- Flow ----------
 
@@ -70,7 +80,7 @@ class AutoSnapService : AccessibilityService() {
         wl = pm.newWakeLock(
             PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP,
             "autosnap:wl"
-        ).also { it.acquire(200_000) }
+        ).also { it.acquire(240_000) }
 
         val launch = packageManager.getLaunchIntentForPackage(Config.SNAP_PKG)
         if (launch == null) { Log.e(TAG, "Snapchat installed nahi"); finish(); return }
@@ -81,55 +91,55 @@ class AutoSnapService : AccessibilityService() {
 
     private fun capture() {
         tapFrac(Config.SHUTTER_X, Config.SHUTTER_Y)
-        h.postDelayed({ openPen() }, 3000)
+        h.postDelayed({ openPen() }, 3500)
     }
 
-    // ---------- Background ek rang ka ----------
+    // ---------- Poori screen black ----------
 
     private fun openPen() {
-        val pen = find("Draw", false) ?: find("Pen", false) ?: find("Pencil", false)
-        if (pen != null) click(pen) else tapFrac(PEN_X, PEN_Y)
-        h.postDelayed({ pickColor() }, 1200)
+        tapFrac(PEN_X, PEN_Y)
+        h.postDelayed({ pickBlack() }, 1500)
     }
 
-    private fun pickColor() {
-        val y = COLOR_Y[dayIndex() % COLOR_Y.size]
-        tapFrac(COLOR_X, y)
-        h.postDelayed({ fillScreen() }, 800)
+    private fun pickBlack() {
+        // laal circle ko slider ke neeche tak kheencho = black
+        drag(SLIDER_X, SLIDER_TOP_Y, SLIDER_X, SLIDER_BOTTOM_Y, 900)
+        h.postDelayed({ fillScreen() }, 1800)
     }
 
     private fun fillScreen() {
         val d = resources.displayMetrics
         val w = d.widthPixels.toFloat()
         val ht = d.heightPixels.toFloat()
-        val gap = FILL_GAP_DP * d.density
+        val left = w * 0.02f
+        val right = w * 0.985f
+        val top = ht * SNAP_TOP
+        var y = ht * SNAP_BOTTOM
+        var toRight = true
         val path = Path()
-        var y = ht * 0.06f
-        var leftToRight = true
-        path.moveTo(w * 0.04f, y)
-        while (y < ht * 0.94f) {
-            path.lineTo(if (leftToRight) w * 0.88f else w * 0.04f, y)
-            y += gap
-            path.lineTo(if (leftToRight) w * 0.88f else w * 0.04f, y)
-            leftToRight = !leftToRight
+        path.moveTo(left, y)
+        while (y >= top) {
+            path.lineTo(if (toRight) right else left, y)
+            y -= FILL_GAP_PX
+            path.lineTo(if (toRight) right else left, y)
+            toRight = !toRight
         }
         val g = GestureDescription.Builder()
-            .addStroke(GestureDescription.StrokeDescription(path, 0, 9000))
+            .addStroke(GestureDescription.StrokeDescription(path, 0, 30000))
             .build()
         dispatchGesture(g, null, null)
-        h.postDelayed({ closePen() }, 10000)
+        h.postDelayed({ closePen() }, 31500)
     }
 
     private fun closePen() {
-        val done = find("Done", true)
-        if (done != null) click(done) else tapFrac(PEN_X, PEN_Y)
-        h.postDelayed({ openCaption() }, 1500)
+        tapFrac(BACK_X, BACK_Y)
+        h.postDelayed({ openCaption() }, 1800)
     }
 
-    // ---------- Emoji caption ----------
+    // ---------- Emoji ----------
 
     private fun openCaption() {
-        tapFrac(CAPTION_TAP_X, CAPTION_TAP_Y)
+        tapFrac(TEXT_X, TEXT_Y)
         h.postDelayed({ typeEmoji() }, 1500)
     }
 
@@ -163,14 +173,30 @@ class AutoSnapService : AccessibilityService() {
         } else if (typed) {
             performGlobalAction(GLOBAL_ACTION_BACK)
         }
-        h.postDelayed({ sendTo() }, 1500)
+        h.postDelayed({ pinchEmoji() }, 1800)
+    }
+
+    private fun pinchEmoji() {
+        val d = resources.displayMetrics
+        val cx = d.widthPixels * EMOJI_CX
+        val cy = d.heightPixels * EMOJI_CY
+        val startGap = d.widthPixels * 0.04f
+        val endGap = d.widthPixels * PINCH_END_FRAC
+        val p1 = Path().apply { moveTo(cx - startGap, cy); lineTo(cx - endGap, cy) }
+        val p2 = Path().apply { moveTo(cx + startGap, cy); lineTo(cx + endGap, cy) }
+        val g = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(p1, 0, 900))
+            .addStroke(GestureDescription.StrokeDescription(p2, 0, 900))
+            .build()
+        dispatchGesture(g, null, null)
+        h.postDelayed({ sendTo() }, 2000)
     }
 
     // ---------- Send ----------
 
     private fun sendTo() {
         val n = find("Send To", false)
-        if (n != null) click(n) else tapFrac(Config.SEND_TO_X, Config.SEND_TO_Y)
+        if (n != null) click(n) else tapFrac(SENDTO_X, SENDTO_Y)
         names = Config.friend(this).split(",").map { it.trim() }.filter { it.isNotEmpty() }
         nameIdx = 0
         scrollTries = 0
@@ -267,6 +293,18 @@ class AutoSnapService : AccessibilityService() {
         val p = Path().apply { moveTo(x, y) }
         val g = GestureDescription.Builder()
             .addStroke(GestureDescription.StrokeDescription(p, 0, 80))
+            .build()
+        dispatchGesture(g, null, null)
+    }
+
+    private fun drag(fx1: Float, fy1: Float, fx2: Float, fy2: Float, dur: Long) {
+        val d = resources.displayMetrics
+        val p = Path().apply {
+            moveTo(d.widthPixels * fx1, d.heightPixels * fy1)
+            lineTo(d.widthPixels * fx2, d.heightPixels * fy2)
+        }
+        val g = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(p, 0, dur))
             .build()
         dispatchGesture(g, null, null)
     }
