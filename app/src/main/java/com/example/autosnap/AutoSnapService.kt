@@ -3,20 +3,14 @@ package com.example.autosnap
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.content.ClipData
-import android.content.ContentValues
+import android.content.ClipboardManager
 import android.content.Intent
-import android.graphics.Bitmap
-import android.graphics.Canvas
-import android.graphics.Color
-import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.Rect
-import android.net.Uri
-import android.os.Build
+import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
-import android.provider.MediaStore
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
@@ -27,6 +21,21 @@ class AutoSnapService : AccessibilityService() {
         const val TAG = "AutoSnap"
         @Volatile var instance: AutoSnapService? = null
 
+        // ---- Tune karne wale numbers (screen ka hissa 0..1) ----
+        // Pen (draw) icon ki jagah, agar naam se na mile
+        const val PEN_X = 0.93f
+        const val PEN_Y = 0.20f
+        // Rang wali patti (slider) ki x jagah
+        const val COLOR_X = 0.93f
+        // Zigzag lines ke beech ka gap (dp me). Chhota = zyada pakka fill, par der lagti hai
+        const val FILL_GAP_DP = 10f
+        // Caption kholne ke liye snap par tap
+        const val CAPTION_TAP_X = 0.5f
+        const val CAPTION_TAP_Y = 0.45f
+
+        // Roj alag rang: slider ki y jagah
+        private val COLOR_Y = listOf(0.30f, 0.38f, 0.46f, 0.54f, 0.62f, 0.70f, 0.78f)
+
         private val EMOJIS = listOf(
             "😀", "😂", "🥰", "😎", "🤩", "😴", "🤔", "🥳", "😇", "🤗",
             "😜", "🙃", "😍", "🤓", "😏", "🥺", "😭", "😡", "🤯", "😱",
@@ -35,11 +44,6 @@ class AutoSnapService : AccessibilityService() {
             "🔥", "🌟", "💖", "💯", "🎉", "🍕", "🍔", "🍟", "🍦", "🍩",
             "🍉", "🍓", "⚽", "🏀", "🎮", "🎧", "🚀", "🌸", "🍀"
         )
-
-        private val COLORS = listOf(
-            "#FFEB3B", "#4FC3F7", "#F48FB1", "#A5D6A7",
-            "#CE93D8", "#FFAB91", "#80CBC4", "#FFF59D"
-        )
     }
 
     private val h = Handler(Looper.getMainLooper())
@@ -47,11 +51,15 @@ class AutoSnapService : AccessibilityService() {
     private var scrollTries = 0
     private var names: List<String> = emptyList()
     private var nameIdx = 0
+    private var typed = false
 
     override fun onServiceConnected() { instance = this }
     override fun onUnbind(intent: Intent?): Boolean { instance = null; return super.onUnbind(intent) }
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
     override fun onInterrupt() {}
+
+    private fun dayIndex(): Int = (System.currentTimeMillis() / 86_400_000L).toInt()
+    private fun todayEmoji(): String = EMOJIS[dayIndex() % EMOJIS.size]
 
     // ---------- Flow ----------
 
@@ -62,27 +70,103 @@ class AutoSnapService : AccessibilityService() {
         wl = pm.newWakeLock(
             PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP,
             "autosnap:wl"
-        ).also { it.acquire(150_000) }
+        ).also { it.acquire(200_000) }
 
-        val uri = prepareEmojiImage()
-        if (uri == null) { Log.e(TAG, "emoji image nahi bani"); finish(); return }
-
-        try {
-            val share = Intent(Intent.ACTION_SEND).apply {
-                type = "image/png"
-                putExtra(Intent.EXTRA_STREAM, uri)
-                clipData = ClipData.newRawUri("", uri)
-                setPackage(Config.SNAP_PKG)
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-            startActivity(share)
-        } catch (e: Exception) {
-            Log.e(TAG, "share fail", e)
-            finish()
-            return
-        }
-        h.postDelayed({ sendTo() }, 7000)
+        val launch = packageManager.getLaunchIntentForPackage(Config.SNAP_PKG)
+        if (launch == null) { Log.e(TAG, "Snapchat installed nahi"); finish(); return }
+        launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+        startActivity(launch)
+        h.postDelayed({ capture() }, 6000)
     }
+
+    private fun capture() {
+        tapFrac(Config.SHUTTER_X, Config.SHUTTER_Y)
+        h.postDelayed({ openPen() }, 3000)
+    }
+
+    // ---------- Background ek rang ka ----------
+
+    private fun openPen() {
+        val pen = find("Draw", false) ?: find("Pen", false) ?: find("Pencil", false)
+        if (pen != null) click(pen) else tapFrac(PEN_X, PEN_Y)
+        h.postDelayed({ pickColor() }, 1200)
+    }
+
+    private fun pickColor() {
+        val y = COLOR_Y[dayIndex() % COLOR_Y.size]
+        tapFrac(COLOR_X, y)
+        h.postDelayed({ fillScreen() }, 800)
+    }
+
+    private fun fillScreen() {
+        val d = resources.displayMetrics
+        val w = d.widthPixels.toFloat()
+        val ht = d.heightPixels.toFloat()
+        val gap = FILL_GAP_DP * d.density
+        val path = Path()
+        var y = ht * 0.06f
+        var leftToRight = true
+        path.moveTo(w * 0.04f, y)
+        while (y < ht * 0.94f) {
+            path.lineTo(if (leftToRight) w * 0.88f else w * 0.04f, y)
+            y += gap
+            path.lineTo(if (leftToRight) w * 0.88f else w * 0.04f, y)
+            leftToRight = !leftToRight
+        }
+        val g = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(path, 0, 9000))
+            .build()
+        dispatchGesture(g, null, null)
+        h.postDelayed({ closePen() }, 10000)
+    }
+
+    private fun closePen() {
+        val done = find("Done", true)
+        if (done != null) click(done) else tapFrac(PEN_X, PEN_Y)
+        h.postDelayed({ openCaption() }, 1500)
+    }
+
+    // ---------- Emoji caption ----------
+
+    private fun openCaption() {
+        tapFrac(CAPTION_TAP_X, CAPTION_TAP_Y)
+        h.postDelayed({ typeEmoji() }, 1500)
+    }
+
+    private fun typeEmoji() {
+        val emoji = todayEmoji()
+        typed = false
+        val root = rootInActiveWindow
+        val focused = root?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+            ?: root?.let { findEditable(it) }
+        if (focused != null) {
+            val args = Bundle().apply {
+                putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, emoji)
+            }
+            var ok = focused.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+            if (!ok) {
+                val cm = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
+                cm.setPrimaryClip(ClipData.newPlainText("emoji", emoji))
+                ok = focused.performAction(AccessibilityNodeInfo.ACTION_PASTE)
+            }
+            typed = ok
+        } else {
+            Log.e(TAG, "caption box nahi mila")
+        }
+        h.postDelayed({ closeCaption() }, 1200)
+    }
+
+    private fun closeCaption() {
+        val done = find("Done", true)
+        if (done != null) {
+            click(done)
+        } else if (typed) {
+            performGlobalAction(GLOBAL_ACTION_BACK)
+        }
+        h.postDelayed({ sendTo() }, 1500)
+    }
+
+    // ---------- Send ----------
 
     private fun sendTo() {
         val n = find("Send To", false)
@@ -127,51 +211,16 @@ class AutoSnapService : AccessibilityService() {
         if (wl?.isHeld == true) wl?.release()
     }
 
-    // ---------- Roj ka naya emoji image ----------
-
-    private fun prepareEmojiImage(): Uri? {
-        val sp = getSharedPreferences("cfg", MODE_PRIVATE)
-        try {
-            // kal wali image hata de
-            sp.getString("emoji_uri", null)?.let {
-                try { contentResolver.delete(Uri.parse(it), null, null) } catch (_: Exception) {}
-            }
-
-            val now = System.currentTimeMillis()
-            val day = (now / 86_400_000L).toInt()
-            val emoji = EMOJIS[day % EMOJIS.size]
-            val bg = Color.parseColor(COLORS[day % COLORS.size])
-
-            val bmp = Bitmap.createBitmap(1080, 1920, Bitmap.Config.ARGB_8888)
-            val cv = Canvas(bmp)
-            cv.drawColor(bg)
-            val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                textSize = 620f
-                textAlign = Paint.Align.CENTER
-            }
-            val fm = paint.fontMetrics
-            val y = 960f - (fm.ascent + fm.descent) / 2f
-            cv.drawText(emoji, 540f, y, paint)
-
-            val v = ContentValues().apply {
-                put(MediaStore.Images.Media.DISPLAY_NAME, "autosnap_emoji_$day.png")
-                put(MediaStore.Images.Media.MIME_TYPE, "image/png")
-                put(MediaStore.Images.Media.DATE_TAKEN, now)
-                if (Build.VERSION.SDK_INT >= 29) {
-                    put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/AutoSnap")
-                }
-            }
-            val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, v) ?: return null
-            contentResolver.openOutputStream(uri)?.use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
-            sp.edit().putString("emoji_uri", uri.toString()).apply()
-            return uri
-        } catch (e: Exception) {
-            Log.e(TAG, "emoji image fail", e)
-            return null
-        }
-    }
-
     // ---------- Helpers ----------
+
+    private fun findEditable(n: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        if (n.isEditable) return n
+        for (i in 0 until n.childCount) {
+            val c = n.getChild(i) ?: continue
+            findEditable(c)?.let { return it }
+        }
+        return null
+    }
 
     private fun find(text: String, exact: Boolean): AccessibilityNodeInfo? {
         val root = rootInActiveWindow ?: return null
